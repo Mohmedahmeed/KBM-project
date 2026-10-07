@@ -1,6 +1,6 @@
 "use client";
 
-import { Children, cloneElement, isValidElement, useEffect, useRef, useState, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import {
@@ -21,6 +21,8 @@ import type { getManagementData } from "@/lib/management-data";
 type Data = Awaited<ReturnType<typeof getManagementData>>;
 export type Section = "overview" | "products" | "stock" | "shipments" | "sales" | "customers" | "payments" | "costs";
 type Action = (formData: FormData) => Promise<ManagementActionResult>;
+type ProductFilter = "all" | "low" | "out" | "untranslated";
+type SearchResult = { kind: string; label: string; detail: string; href: string };
 
 const money = (value: number | string | null) => new Intl.NumberFormat("fr-TN", {
   style: "currency",
@@ -65,7 +67,7 @@ const arabicCopy: Record<string, string> = {
   "Prix de vente unitaire (TND)": "سعر البيع للقطعة (دينار)",
   "Photo (JPG, PNG, WebP · 5 Mo max.)": "الصورة (JPG أو PNG أو WebP · حتى 5 ميغابايت)",
   "Photo actuelle": "الصورة الحالية",
-  "Traductions produits": "ترجمة أسماء المنتجات", "Importer photos": "استيراد الصور",
+  "Traductions produits": "ترجمة أسماء المنتجات", "Importer le stock": "استيراد المخزون",
   "Assistant commercial": "المساعد التجاري",
   "Le nom d’origine importé est conservé pour le bot. Les documents afficheront le nom français ou arabe, jamais le texte chinois brut.": "سيبقى الاسم الأصلي محفوظا للبوت. ستعرض الوثائق الاسم الفرنسي أو العربي دون النص الصيني.",
   "Stock actuel": "المخزون الحالي", "État": "الحالة", "Rupture": "نفد", "Stock faible": "مخزون منخفض",
@@ -100,6 +102,24 @@ const arabicCopy: Record<string, string> = {
   "Ajouter un frais au container": "إضافة مصروف للحاوية", "Enregistrer le frais": "حفظ المصروف",
   "Taux vers TND": "سعر التحويل إلى الدينار", "Répartition du coût": "توزيع الكلفة",
   "Valeur": "القيمة", "CBM": "الحجم CBM", "Pièces": "القطع",
+  "Article": "منتج", "Vente": "بيع", "Paiement": "خلاص",
+  "Recherche rapide": "بحث سريع", "Rechercher un article, client, container ou opération": "ابحث عن منتج أو حريف أو حاوية أو عملية",
+  "Nom traduit, référence, client, container…": "اسم مترجم، رمز، حريف، حاوية…", "Résultats de recherche": "نتائج البحث",
+  "Le terme filtre aussi la rubrique ouverte.": "كلمة البحث تصفي القسم المفتوح أيضا.",
+  "Stock faible ou rupture · 10 pièces ou moins": "مخزون منخفض أو نفد · 10 قطع أو أقل",
+  "Articles les plus vendus": "المنتجات الأكثر مبيعا", "Quantités vendues sur les 30 derniers jours": "الكميات المباعة خلال آخر 30 يوما",
+  "Sans vente récente": "منتجات دون مبيعات حديثة", "Articles en stock sans vente sur les 30 derniers jours": "منتجات متوفرة دون مبيعات خلال آخر 30 يوما",
+  "À réapprovisionner": "تحتاج إلى إعادة التزويد", "Aucune vente · 30 j": "دون مبيعات · 30 يوما",
+  "Aucun produit dans cette sélection.": "لا توجد منتجات في هذا الاختيار.",
+  "Noms traduits uniquement": "الأسماء المترجمة فقط", "Tous": "الكل",
+  "Traductions à compléter": "ترجمات تحتاج إلى إكمال",
+  "articles": "منتجات", "article": "منتج", "noms traduits uniquement": "الأسماء المترجمة فقط",
+  "Photo non disponible": "الصورة غير متوفرة", "Traduction arabe à compléter": "الترجمة العربية تحتاج إلى إكمال",
+  "FICHE ARTICLE": "بطاقة المنتج", "Informations de l’article": "معلومات المنتج",
+  "Modifier les informations": "تعديل المعلومات", "Ajouter un article": "إضافة منتج",
+  "Photo actuelle — choisissez une image pour la remplacer": "الصورة الحالية — اختر صورة جديدة لاستبدالها",
+  "Ajouter ou remplacer la photo (JPG, PNG, WebP · 5 Mo max.)": "إضافة أو استبدال الصورة (JPG أو PNG أو WebP · 5 ميغابايت كحد أقصى)",
+  "Couleur": "اللون",
 };
 
 function localize(node: ReactNode, enabled = true, dataArray = false): ReactNode {
@@ -107,6 +127,8 @@ function localize(node: ReactNode, enabled = true, dataArray = false): ReactNode
   if (typeof node === "string") {
     return arabicCopy[node] ?? node.replace(/(\d+) références en stock/g, "$1 منتجات متوفرة في المخزون")
       .replace(/(\d+) containers au total/g, "$1 حاويات إجمالا")
+      .replace(/^(\d+) articles? · noms traduits uniquement$/g, "$1 منتجات · الأسماء المترجمة فقط")
+      .replace(/^(\d+) vendues en 30 j$/g, "$1 مباعة خلال 30 يوما")
       .replace(/\bpcs\b/g, "قطعة")
       .replace(/À régler/g, "غير مدفوع")
       .replace(/Réglée/g, "مدفوع");
@@ -136,12 +158,13 @@ function localize(node: ReactNode, enabled = true, dataArray = false): ReactNode
   return cloneElement(node, props);
 }
 
-function ActionForm({ title, action, children, submitLabel, prepare }: {
+function ActionForm({ title, action, children, submitLabel, prepare, onSuccess }: {
   title: string;
   action: Action;
   children: ReactNode;
   submitLabel: string;
   prepare?: (formData: FormData) => void;
+  onSuccess?: () => void;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
   const [result, setResult] = useState<ManagementActionResult | null>(null);
@@ -154,6 +177,7 @@ function ActionForm({ title, action, children, submitLabel, prepare }: {
     if (response.success) {
       formRef.current?.reset();
       setFormKey((key) => key + 1);
+      onSuccess?.();
     }
   }
 
@@ -169,7 +193,7 @@ function ActionForm({ title, action, children, submitLabel, prepare }: {
   );
 }
 
-function Field({ label, name, type = "text", required = false, defaultValue, placeholder, step, min, accept, options }: {
+function Field({ label, name, type = "text", required = false, defaultValue, placeholder, step, min, maxLength, accept, readOnly = false, options }: {
   label: string;
   name: string;
   type?: string;
@@ -178,7 +202,9 @@ function Field({ label, name, type = "text", required = false, defaultValue, pla
   placeholder?: string;
   step?: string;
   min?: string;
+  maxLength?: number;
   accept?: string;
+  readOnly?: boolean;
   options?: { value: string; label: string }[];
 }) {
   return (
@@ -186,7 +212,7 @@ function Field({ label, name, type = "text", required = false, defaultValue, pla
       <span>{label}</span>
       {options
         ? <select name={name} required={required} defaultValue={defaultValue}>{options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select>
-        : <input name={name} type={type} required={required} defaultValue={defaultValue} placeholder={placeholder} step={step} min={min} accept={accept} />}
+        : <input name={name} type={type} required={required} defaultValue={defaultValue} placeholder={placeholder} step={step} min={min} maxLength={maxLength} accept={accept} readOnly={readOnly} />}
     </label>
   );
 }
@@ -206,51 +232,99 @@ function DataTable({ headers, rows, empty }: { headers: string[]; rows: ReactNod
   );
 }
 
-function MovementBadge({ children }: { children: ReactNode }) {
-  return <span className="management-badge">{children}</span>;
-}
+function ProductEditor({ product, locale, onClose }: {
+  product: Data["products"][number] | null;
+  locale: "fr" | "ar";
+  onClose: () => void;
+}) {
+  const previousFocus = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape);
+      previousFocus.current?.focus();
+    };
+  }, [onClose]);
 
-function ProductEditor({ products, locale }: { products: Data["products"]; locale: "fr" | "ar" }) {
-  const [sku, setSku] = useState("");
-  const product = products.find((item) => item.sku === sku);
-  const options = products.map((item) => ({
-    value: item.sku,
-    label: `${item.sku} · ${locale === "ar"
-      ? item.name_ar || item.name_fr || "اسم يحتاج إلى ترجمة"
-      : item.name_fr || item.name_ar || "Nom à traduire"}`,
-  }));
-
-  const form = (
-    <ActionForm
-      key={sku || "new-product"}
-      title="Ajouter ou mettre à jour un produit"
-      action={saveProduct}
-      submitLabel="Enregistrer le produit"
-    >
-      <label className="management-field">
-        <span>Produit existant à modifier (facultatif)</span>
-        <select value={sku} onChange={(event) => setSku(event.target.value)}>
-          <option value="">Nouveau produit</option>
-          {options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
-        </select>
-      </label>
-      <Field label="SKU" name="sku" defaultValue={product?.sku ?? ""} required />
-      <Field label="Nom en français" name="name_fr" defaultValue={product?.name_fr ?? ""} />
-      <Field label="الاسم بالعربية" name="name_ar" defaultValue={product?.name_ar ?? ""} />
-      <Field label="Pièces par carton" name="pcs_per_carton" type="number" min="1" defaultValue={product?.pcs_per_carton ?? ""} required />
-      <Field label="Taille / variante" name="size" defaultValue={product?.size ?? ""} />
-      <Field label="Prix de vente unitaire (TND)" name="sale_price" type="number" min="0" step="0.001" defaultValue={product?.sale_price ?? ""} />
-      <Field label="Photo (JPG, PNG, WebP · 5 Mo max.)" name="image" type="file" accept="image/jpeg,image/png,image/webp" />
-      {product?.image_url && <div className="management-product-preview"><Image src={product.image_url} alt="" width={50} height={50} unoptimized />Photo actuelle</div>}
-      <p className="management-hint">Le nom d’origine importé est conservé pour le bot. Les documents afficheront le nom français ou arabe, jamais le texte chinois brut.</p>
-    </ActionForm>
+  const isArabic = locale === "ar";
+  const editor = (
+    <div className="management-modal-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section
+        className="management-product-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="product-modal-title"
+        dir={isArabic ? "rtl" : "ltr"}
+        onKeyDown={(event) => {
+          if (event.key !== "Tab") return;
+          const focusable = event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]");
+          const first = focusable.item(0);
+          const last = focusable.item(focusable.length - 1);
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last?.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first?.focus();
+          }
+        }}
+      >
+        <header className="management-product-modal-header">
+          <div>
+            <span>{isArabic ? "معلومات المنتج" : "FICHE ARTICLE"}</span>
+            <h2 id="product-modal-title">{product
+              ? (product.name_fr || product.name_ar || (isArabic ? "منتج" : "Article"))
+              : (isArabic ? "إضافة منتج" : "Ajouter un article")}</h2>
+          </div>
+          <button type="button" className="management-modal-close" onClick={onClose} aria-label={isArabic ? "إغلاق" : "Fermer"} autoFocus>×</button>
+        </header>
+        {product?.image_url && (
+          <div className="management-product-modal-preview">
+            <Image src={product.image_url} alt="" width={180} height={140} unoptimized />
+            <span>{isArabic ? "الصورة الحالية — اختر صورة جديدة لاستبدالها" : "Photo actuelle — choisissez une image pour la remplacer"}</span>
+          </div>
+        )}
+        <ActionForm
+          key={product?.sku ?? "new-product"}
+          title={isArabic ? "Modifier les informations" : "Informations de l’article"}
+          action={saveProduct}
+          submitLabel={product
+            ? (isArabic ? "حفظ التعديلات" : "Enregistrer les modifications")
+            : (isArabic ? "إضافة المنتج" : "Ajouter l’article")}
+          onSuccess={onClose}
+        >
+          {product
+            ? <><input type="hidden" name="sku" value={product.sku} /><p className="management-product-modal-sku"><span>SKU</span><strong>{product.sku}</strong></p></>
+            : <Field label="SKU" name="sku" required />}
+          <Field label="Nom en français" name="name_fr" defaultValue={product?.name_fr ?? ""} maxLength={250} />
+          <Field label="الاسم بالعربية" name="name_ar" defaultValue={product?.name_ar ?? ""} maxLength={250} />
+          <Field label="Couleur" name="color" defaultValue={product?.color ?? ""} maxLength={100} />
+          <Field label="Taille / variante" name="size" defaultValue={product?.size ?? ""} maxLength={100} />
+          <Field label="Pièces par carton" name="pcs_per_carton" type="number" min="1" defaultValue={product?.pcs_per_carton ?? ""} required />
+          <Field label="Prix de vente unitaire (TND)" name="sale_price" type="number" min="0" step="0.001" defaultValue={product?.sale_price ?? ""} />
+          <Field label="Ajouter ou remplacer la photo (JPG, PNG, WebP · 5 Mo max.)" name="image" type="file" accept="image/jpeg,image/png,image/webp" />
+          <p className="management-hint">{isArabic
+            ? "تغيير عدد القطع في الكرتونة يؤثر على الشحنات القادمة فقط، ولا يغير المخزون المسجل أو بيانات الشحنات السابقة."
+            : "Modifier les pièces par carton concerne les futurs containers seulement : le stock actuel et les anciennes réceptions ne changent pas."}</p>
+        </ActionForm>
+      </section>
+    </div>
   );
-  return locale === "ar" ? localize(form) : form;
+  return isArabic ? localize(editor) : editor;
 }
 
-export function ManagementWorkspace({ data, today, initialSection = "overview" }: { data: Data; today: string; initialSection?: Section }) {
+export function ManagementWorkspace({ data, today, initialSection = "overview", initialSearch = "" }: { data: Data; today: string; initialSection?: Section; initialSearch?: string }) {
   const section = initialSection;
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch);
+  const [productFilter, setProductFilter] = useState<ProductFilter>("all");
+  const [editingProductSku, setEditingProductSku] = useState<string | null>(null);
+  const closeProductEditor = useCallback(() => setEditingProductSku(null), []);
   const [locale, setLocale] = useState<"fr" | "ar">("fr");
   const [localeLoaded, setLocaleLoaded] = useState(false);
   const isArabic = locale === "ar";
@@ -266,6 +340,71 @@ export function ManagementWorkspace({ data, today, initialSection = "overview" }
     document.documentElement.dir = isArabic ? "rtl" : "ltr";
   }, [isArabic, locale]);
   const query = search.trim().toLocaleLowerCase(isArabic ? "ar" : "fr");
+  const searchResults: SearchResult[] = query.length < 2 ? [] : [
+    ...data.products
+      .filter((product) => `${product.sku} ${product.name_fr ?? ""} ${product.name_ar ?? ""} ${product.size ?? ""} ${product.color ?? ""}`.toLocaleLowerCase("fr").includes(query))
+      .slice(0, 6)
+      .map((product) => ({
+        kind: isArabic ? "منتج" : "Article",
+        label: `${product.name_fr || product.name_ar || "Nom à traduire"} · ${product.sku}`,
+        detail: `${product.stock} pcs · ${product.sale_price == null ? "Prix à définir" : money(product.sale_price)}`,
+        href: `/management/products?search=${encodeURIComponent(search.trim())}`,
+      })),
+    ...data.customers
+      .filter((customer) => `${customer.name} ${customer.phone ?? ""}`.toLocaleLowerCase("fr").includes(query))
+      .slice(0, 5)
+      .map((customer) => ({
+        kind: isArabic ? "حريف" : "Client",
+        label: customer.name,
+        detail: customer.phone ?? "",
+        href: `/management/customers/${customer.id}`,
+      })),
+    ...data.shipments
+      .filter((shipment) => `${shipment.code} ${shipment.notes ?? ""}`.toLocaleLowerCase("fr").includes(query))
+      .slice(0, 4)
+      .map((shipment) => ({
+        kind: isArabic ? "حاوية" : "Container",
+        label: shipment.code,
+        detail: `${shipment.units} pcs · ${shipment.arrived ? "Reçu" : "En transit"}`,
+        href: `/management/shipments?search=${encodeURIComponent(search.trim())}`,
+      })),
+    ...data.sales
+      .filter((sale) => {
+        const customer = data.customers.find((item) => item.id === sale.customer_id)?.name ?? "";
+        return `#${sale.id} ${customer} ${sale.note ?? ""}`.toLocaleLowerCase("fr").includes(query);
+      })
+      .slice(0, 4)
+      .map((sale) => ({
+        kind: isArabic ? "بيع" : "Vente",
+        label: `Vente #${sale.id}`,
+        detail: `${data.customers.find((item) => item.id === sale.customer_id)?.name ?? "Client"} · ${money(sale.total_tnd)}`,
+        href: `/management/sales?search=${encodeURIComponent(search.trim())}`,
+      })),
+    ...data.payments
+      .filter((payment) => {
+        const customer = data.customers.find((item) => item.id === payment.customer_id)?.name ?? "";
+        return `${customer} ${payment.method ?? ""} ${payment.note ?? ""} ${payment.id}`.toLocaleLowerCase("fr").includes(query);
+      })
+      .slice(0, 4)
+      .map((payment) => ({
+        kind: isArabic ? "خلاص" : "Paiement",
+        label: `${data.customers.find((item) => item.id === payment.customer_id)?.name ?? "Client"} · #${payment.id}`,
+        detail: money(payment.amount_tnd),
+        href: `/management/payments?search=${encodeURIComponent(search.trim())}`,
+      })),
+    ...data.shipmentCosts
+      .filter((cost) => {
+        const shipmentCode = data.shipments.find((item) => item.id === cost.shipment_id)?.code ?? "";
+        return `${shipmentCode} ${cost.type} ${cost.label ?? ""} ${cost.id}`.toLocaleLowerCase("fr").includes(query);
+      })
+      .slice(0, 4)
+      .map((cost) => ({
+        kind: isArabic ? "مصروف" : "Frais",
+        label: `${cost.type} · #${cost.id}`,
+        detail: `${data.shipments.find((item) => item.id === cost.shipment_id)?.code ?? "Container"} · ${cost.currency} ${cost.amount}`,
+        href: `/management/costs?search=${encodeURIComponent(search.trim())}`,
+      })),
+  ].slice(0, 12);
   const productOptions = data.products.map((product) => ({
     value: product.sku,
     label: `${product.sku} · ${isArabic
@@ -275,8 +414,14 @@ export function ManagementWorkspace({ data, today, initialSection = "overview" }
   const customerOptions = data.customers.map((customer) => ({ value: String(customer.id), label: customer.name }));
   const shipmentOptions = data.shipments.map((shipment) => ({ value: String(shipment.id), label: shipment.code }));
 
-  const visibleProducts = data.products.filter((product) =>
-    `${product.sku} ${product.name_fr ?? ""} ${product.name_ar ?? ""} ${product.size ?? ""}`.toLocaleLowerCase("fr").includes(query));
+  const visibleProducts = data.products.filter((product) => {
+    const matchesSearch = `${product.sku} ${product.name_fr ?? ""} ${product.name_ar ?? ""} ${product.size ?? ""} ${product.color ?? ""}`.toLocaleLowerCase("fr").includes(query);
+    const matchesFilter = productFilter === "all"
+      || (productFilter === "low" && product.stock > 0 && product.stock <= 10)
+      || (productFilter === "out" && product.stock === 0)
+      || (productFilter === "untranslated" && (!product.name_fr || !product.name_ar));
+    return matchesSearch && matchesFilter;
+  });
   const visibleCustomers = data.customers.filter((customer) =>
     `${customer.name} ${customer.phone ?? ""}`.toLocaleLowerCase("fr").includes(query));
   const visibleShipments = data.shipments.filter((shipment) =>
@@ -297,6 +442,63 @@ export function ManagementWorkspace({ data, today, initialSection = "overview" }
   const totalUnits = data.products.reduce((sum, product) => sum + product.stock, 0);
   const activeShipments = data.shipments.filter((shipment) => !shipment.arrived).length;
   const unpaid = data.customers.reduce((sum, customer) => sum + Math.max(0, customer.balance), 0);
+  const periodStartDate = new Date(`${today}T00:00:00.000Z`);
+  periodStartDate.setUTCDate(periodStartDate.getUTCDate() - 29);
+  const periodStart = periodStartDate.toISOString().slice(0, 10);
+  const activeSaleIds = new Set(data.sales
+    .filter((sale) => !sale.voided_at && sale.sale_date >= periodStart && sale.sale_date <= today)
+    .map((sale) => sale.id));
+  const unitsSoldBySku = new Map<string, number>();
+  for (const item of data.saleItems) {
+    if (activeSaleIds.has(item.sale_id)) {
+      unitsSoldBySku.set(item.sku, (unitsSoldBySku.get(item.sku) ?? 0) + Number(item.qty));
+    }
+  }
+  const fastestSellers = data.products
+    .map((product) => ({ ...product, unitsSold: unitsSoldBySku.get(product.sku) ?? 0 }))
+    .filter((product) => product.unitsSold > 0)
+    .sort((a, b) => b.unitsSold - a.unitsSold)
+    .slice(0, 6);
+  const noRecentSales = data.products
+    .filter((product) => product.stock > 0 && (unitsSoldBySku.get(product.sku) ?? 0) === 0)
+    .sort((a, b) => b.stock - a.stock)
+    .slice(0, 6);
+  const lowStockProducts = data.products
+    .filter((product) => product.stock <= 10)
+    .sort((a, b) => a.stock - b.stock)
+    .slice(0, 8);
+
+  function renderProductCards(products: typeof data.products, quantityLabel: (sku: string) => string) {
+    if (products.length === 0) return <p className="management-empty">Aucun produit dans cette sélection.</p>;
+    return (
+      <div className="management-product-grid">
+        {products.map((product) => (
+          <article className="management-product-card" key={product.sku}>
+            <Link className="management-product-card-image" href={`/management/products?search=${encodeURIComponent(product.sku)}`}>
+              {product.image_url
+                ? <Image src={product.image_url} alt="" width={180} height={140} unoptimized />
+                : <span>{isArabic ? "لا توجد صورة" : "Photo non disponible"}</span>}
+            </Link>
+            <div className="management-product-card-copy">
+              <div className="management-product-card-top">
+                <strong>{product.sku}</strong>
+                <span className={product.stock <= 10 ? "management-stock-pill low" : "management-stock-pill"}>{product.stock === 0 ? "Rupture" : `${product.stock} pcs`}</span>
+              </div>
+              <Link className="management-product-card-name" href={`/management/products?search=${encodeURIComponent(product.sku)}`}>
+                {product.name_fr || product.name_ar || "Nom à traduire"}
+              </Link>
+              {product.name_ar && <span className="management-product-card-ar" lang="ar" dir="rtl">{product.name_ar}</span>}
+              <div className="management-product-card-bottom">
+                <span>{[product.color, product.size].filter(Boolean).join(" · ")}</span>
+                <span>{quantityLabel(product.sku)}</span>
+                <span>{product.sale_price == null ? "Prix à définir" : money(product.sale_price)}</span>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    );
+  }
 
   function renderSection() {
     switch (section) {
@@ -310,12 +512,8 @@ export function ManagementWorkspace({ data, today, initialSection = "overview" }
               <article><span>À recevoir des clients</span><strong>{money(unpaid)}</strong><small>Soldes clients positifs</small></article>
             </div>
             <div className="management-panels">
-              <section className="management-panel"><h2>Alertes de stock</h2>
-                <DataTable headers={["SKU", "Produit", "Stock", "Prix de vente"]} empty="Aucune alerte de stock." rows={data.products.filter((product) => product.stock <= 10).slice(0, 8).map((product) => [
-                  <strong key="sku">{product.sku}</strong>, product.name_fr || product.name_ar || "Traduction à compléter",
-                  <MovementBadge key="stock">{product.stock} pcs</MovementBadge>,
-                  product.sale_price == null ? "Prix à définir" : money(product.sale_price),
-                ])} />
+              <section className="management-panel"><div className="management-panel-title"><h2>Stock faible ou rupture · 10 pièces ou moins</h2><Link href="/management/stock">Voir le stock</Link></div>
+                {renderProductCards(lowStockProducts, () => "À réapprovisionner")}
               </section>
               <section className="management-panel"><h2>Dernières ventes</h2>
                 <DataTable headers={["Date", "Client", "Montant", "État"]} empty="Aucune vente enregistrée." rows={data.sales.filter((sale) => !sale.voided_at).slice(0, 8).map((sale) => [
@@ -326,21 +524,81 @@ export function ManagementWorkspace({ data, today, initialSection = "overview" }
                 ])} />
               </section>
             </div>
+            <section className="management-panel management-sales-insights">
+              <div className="management-panel-title">
+                <div><h2>Articles les plus vendus</h2><p>Quantités vendues sur les 30 derniers jours</p></div>
+                <Link href="/management/sales">Voir les ventes</Link>
+              </div>
+              {renderProductCards(fastestSellers, (sku) => `${unitsSoldBySku.get(sku) ?? 0} vendues en 30 j`)}
+            </section>
+            <section className="management-panel management-sales-insights">
+              <div className="management-panel-title">
+                <div><h2>Sans vente récente</h2><p>Articles en stock sans vente sur les 30 derniers jours</p></div>
+                <Link href="/management/products">Voir les articles</Link>
+              </div>
+              {renderProductCards(noRecentSales, () => "Aucune vente · 30 j")}
+            </section>
           </>
         );
       case "products":
         return (
           <>
-            <DataTable headers={["Photo", "SKU", "Nom français", "الاسم بالعربية", "Taille", "Pièces/carton", "Stock (pcs)", "Prix de vente"]} empty="Aucun produit trouvé." rows={visibleProducts.map((product) => [
-              product.image_url ? <Image key="image" src={product.image_url} alt="" width={42} height={42} unoptimized className="management-product-thumbnail" /> : "—",
-              <strong key="sku">{product.sku}</strong>,
-              product.name_fr || <span className="management-translation-missing">Traduction à compléter</span>,
-              product.name_ar ? <span dir="auto">{product.name_ar}</span> : <span className="management-translation-missing">Traduction à compléter</span>,
-              product.size ?? "—",
-              product.pcs_per_carton ?? "—", product.stock,
-              product.sale_price == null ? "À définir" : money(product.sale_price),
-            ])} />
-            <ProductEditor products={data.products} locale={locale} />
+            <div className="management-product-toolbar">
+              <p>{visibleProducts.length} {visibleProducts.length === 1 ? "article" : "articles"} · noms traduits uniquement</p>
+              <div className="management-product-filters" aria-label="Filtrer les produits">
+                {([
+                  ["all", "Tous"],
+                  ["low", "Stock faible"],
+                  ["out", "Rupture"],
+                  ["untranslated", "Traductions à compléter"],
+                ] as const).map(([filter, label]) => (
+                  <button className={productFilter === filter ? "selected" : ""} key={filter} type="button" onClick={() => setProductFilter(filter)}>{label}</button>
+                ))}
+              </div>
+            </div>
+            {visibleProducts.length
+              ? <div className="management-product-grid management-product-grid-catalog">
+                  {visibleProducts.map((product) => (
+                    <article
+                      className="management-product-card management-product-card-button"
+                      key={product.sku}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setEditingProductSku(product.sku)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setEditingProductSku(product.sku);
+                        }
+                      }}
+                      aria-label={`${isArabic ? "تعديل" : "Modifier"} ${product.name_fr || product.name_ar || product.sku}`}
+                    >
+                      <div className="management-product-card-image">
+                        {product.image_url
+                          ? <Image src={product.image_url} alt="" width={240} height={180} unoptimized />
+                          : <span>Photo non disponible</span>}
+                      </div>
+                      <div className="management-product-card-copy">
+                        <div className="management-product-card-top">
+                          <strong>{product.sku}</strong>
+                          <span className={product.stock <= 10 ? "management-stock-pill low" : "management-stock-pill"}>{product.stock} pcs</span>
+                        </div>
+                        <h2 className="management-product-card-name">{product.name_fr || product.name_ar || "Nom à traduire"}</h2>
+                        {product.name_ar
+                          ? <span className="management-product-card-ar" lang="ar" dir="rtl">{product.name_ar}</span>
+                          : <span className="management-translation-missing">Traduction arabe à compléter</span>}
+                        <div className="management-product-card-bottom">
+                          <span>{[product.color, product.size].filter(Boolean).join(" · ") || "—"} · {product.pcs_per_carton ?? "—"} pcs/carton</span>
+                          <strong>{product.sale_price == null ? "Prix à définir" : money(product.sale_price)}</strong>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              : <p className="management-empty">Aucun produit trouvé.</p>}
+            <button className="management-add-product" type="button" onClick={() => setEditingProductSku("__new__")}>
+              {isArabic ? "+ إضافة منتج" : "+ Ajouter un article"}
+            </button>
           </>
         );
       case "stock":
@@ -554,7 +812,7 @@ export function ManagementWorkspace({ data, today, initialSection = "overview" }
           <div><p>KBM STOCK / GESTION</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div>
           <div className="management-header-links">
             <Link href="/management/translations">Traductions produits ({data.products.filter((product) => !product.name_fr || !product.name_ar).length})</Link>
-            <Link href="/management/import-photos">Importer photos</Link>
+            <Link href="/management/import-stock">Importer le stock</Link>
             <Link href="/management/assistant">Assistant commercial</Link>
             <Link href={`/management/documents?kind=annual&year=${today.slice(0, 4)}`} target="_blank">Bilan annuel</Link>
             <Link href="/">Tableau de bord</Link>
@@ -564,11 +822,33 @@ export function ManagementWorkspace({ data, today, initialSection = "overview" }
         <div className="management-content">
           <div className="management-toolbar">
             <p>Les modifications sont enregistrées dans votre base Supabase et partagées avec le bot Telegram.</p>
-            {section !== "overview" && <input aria-label={isArabic ? "ابحث في هذا القسم" : "Rechercher dans cette section"} placeholder={isArabic ? "بحث…" : "Rechercher…"} value={search} onChange={(event) => setSearch(event.target.value)} />}
+            <div className="management-search">
+              <label htmlFor="management-global-search">{isArabic ? "بحث سريع" : "Recherche rapide"}</label>
+              <input id="management-global-search" aria-label={isArabic ? "ابحث عن منتج أو حريف أو عملية" : "Rechercher un article, client, container ou opération"} placeholder={isArabic ? "اسم، رمز، حريف…" : "Nom traduit, référence, client, container…"} value={search} onChange={(event) => setSearch(event.target.value)} autoComplete="off" />
+              {searchResults.length > 0 && (
+                <div className="management-search-results" role="listbox" aria-label={isArabic ? "نتائج البحث" : "Résultats de recherche"}>
+                  {searchResults.map((result, index) => (
+                    <Link href={result.href} key={`${result.kind}-${result.href}-${index}`} role="option">
+                      <span className="management-search-result-kind">{result.kind}</span>
+                      <strong>{result.label}</strong>
+                      <small>{result.detail}</small>
+                    </Link>
+                  ))}
+                </div>
+              )}
+              {section !== "overview" && <span className="management-search-hint">{isArabic ? "نفس البحث يفلتر الصفحة الحالية" : "Le terme filtre aussi la rubrique ouverte."}</span>}
+            </div>
           </div>
           {renderSection()}
           <footer className="management-footer">Données en direct · Accès administrateur sécurisé</footer>
         </div>
+        {editingProductSku !== null && (
+          <ProductEditor
+            product={editingProductSku === "__new__" ? null : data.products.find((product) => product.sku === editingProductSku) ?? null}
+            locale={locale}
+            onClose={closeProductEditor}
+          />
+        )}
       </section>
     </main>,
     isArabic,

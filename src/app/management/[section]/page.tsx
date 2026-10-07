@@ -25,8 +25,13 @@ export async function generateMetadata({ params }: PageProps<"/management/[secti
 
 export default async function ManagementSectionPage(props: PageProps<"/management/[section]">) {
   await requireManagementAdmin();
-  const { section } = await props.params;
+  const [{ section }, searchParams] = await Promise.all([props.params, props.searchParams]);
   if (!isManagementSection(section)) notFound();
   const data = await getManagementData();
-  return <ManagementWorkspace data={data} today={getTunisToday()} initialSection={section} />;
+  return <ManagementWorkspace
+    data={data}
+    today={getTunisToday()}
+    initialSection={section}
+    initialSearch={typeof searchParams.search === "string" ? searchParams.search : ""}
+  />;
 }

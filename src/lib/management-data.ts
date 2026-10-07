@@ -14,7 +14,7 @@ export async function getManagementData() {
     saleItemsResult,
     paymentsResult,
   ] = await Promise.all([
-    supabase.from("products").select("sku,name,name_fr,name_ar,size,pcs_per_carton,sale_price,image_path").order("sku").limit(1000),
+    supabase.from("products").select("sku,name,name_fr,name_ar,size,color,pcs_per_carton,sale_price,image_path").order("sku").limit(1000),
     supabase.from("stock_movements").select("mv_date,sku,qty,type,sale_id").limit(5000),
     supabase.from("shipments").select("id,code,ship_date,fx_rmb_tnd,arrived,notes").order("ship_date", { ascending: false }).limit(1000),
     supabase.from("shipment_items").select("shipment_id,sku,cartons,pcs_per_carton,total_pcs,unit_price_rmb").limit(5000),

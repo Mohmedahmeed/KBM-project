@@ -18,8 +18,8 @@ The management area is available at `/management`; sign in first with the config
 
 | Area | Path | What it does |
 | --- | --- | --- |
-| Overview | `/management` | Commercial summary and recent alerts/activity |
-| Products | `/management/products` | Product catalogue, display names, prices, and product information |
+| Overview | `/management` | Commercial summary, low-stock alerts, best sellers and products with no sales in the last 30 days |
+| Products | `/management/products` | Photo-led catalogue with French/Arabic display names, stock/price details, filters, and a click-to-edit product form |
 | Stock | `/management/stock` | Stock movements and available quantity |
 | Shipments | `/management/shipments` | Containers, shipment lines, and receiving stock |
 | Sales | `/management/sales` | Record sales and associated stock movements |
@@ -27,11 +27,13 @@ The management area is available at `/management`; sign in first with the config
 | Payments | `/management/payments` | Customer payments |
 | Container costs | `/management/costs` | Shipment-related costs |
 | Product translations | `/management/translations` | Review French and Arabic product-name suggestions before saving |
-| Import product photos | `/management/import-photos` | Match photos in an `.xlsx` packing list to existing product SKUs |
+| Import container packing list | `/management/import-stock` | Preview products, costs, optional sale prices, received stock, and embedded photos from an `.xlsx` packing list |
 | Commercial documents | `/management/documents` | Print internal documents or use the browser's **Print → Save as PDF** |
 | Assistant | `/management/assistant` | Calls the optional n8n webhook; see [Assistant status and setup](#assistant-status-and-setup) |
 
-Product source names are kept separately from French and Arabic display names. Translation suggestions are not saved until an administrator reviews and submits them. Photo matching is based on existing SKUs; review the match preview before upload. Images are optimized in the browser and stored in a private Supabase Storage bucket, with a 5 MB per-image limit. The workbook is analyzed locally in the browser; the upload does not go through Telegram or an AI provider.
+Product source names are kept separately from French and Arabic display names. Translation suggestions are not saved until an administrator reviews and submits them. Packing lists are analyzed locally in the browser; the workbook is not sent to Telegram or an AI provider. Embedded photos are optimized in the browser and stored in a private Supabase Storage bucket, with a 5 MB per-image limit.
+
+The management workspace includes one quick search for products, customers, containers, sales, and payments. It matches the records already loaded by the management pages; Elasticsearch is not required. Product names in the catalogue and search results use reviewed French/Arabic display names rather than the original source-language name. Click a product card to edit its translations, color, size/variant, pieces per carton, sale price, or replace its photo. Changing pieces per carton affects future imports only; it does not rewrite received shipment history or stock. Sales velocity panels use non-voided sale lines dated within the last 30 business-calendar days; low stock uses the current 10-piece alert threshold.
 
 ## Requirements
 
@@ -96,8 +98,11 @@ All SQL changes live in [`supabase/migrations`](./supabase/migrations). Apply th
 | [`20261002000004_product_media_and_translations.sql`](./supabase/migrations/20261002000004_product_media_and_translations.sql) | Adds product media and bilingual display-name support. |
 | [`20261002000005_reviewed_product_translations.sql`](./supabase/migrations/20261002000005_reviewed_product_translations.sql) | Supports saving reviewed product translations. |
 | [`20261002000006_product_photo_import.sql`](./supabase/migrations/20261002000006_product_photo_import.sql) | Adds the protected database operation used by product-photo import. |
+| [`20261006000000_kbm1_received_shipment_import.sql`](./supabase/migrations/20261006000000_kbm1_received_shipment_import.sql) | Adds the admin-only, idempotent transaction for importing a received container packing list. |
+| [`20261006000001_kbm1_cost_preview_and_sale_prices.sql`](./supabase/migrations/20261006000001_kbm1_cost_preview_and_sale_prices.sql) | Adds exact database-side landed-cost/sale-price previews, expense allocation, and optional manager-entered product prices to the import transaction. |
+| [`20261007000000_product_color.sql`](./supabase/migrations/20261007000000_product_color.sql) | Adds a product color field and updates the admin-only product save function to edit product attributes. |
 
-For a **new empty database**, run all migrations from `20261002000000` through `20261002000006`, in order. For the existing KBM database, do not rerun the initial schema or migrations already applied; apply only missing migrations, in order. If unsure, inspect the schema and migration history or ask the database owner before running SQL.
+For a **new empty database**, run all migrations from `20261002000000` through `20261002000006`, followed by `20261006000000`, `20261006000001`, and `20261007000000`, in order. For the existing KBM database, do not rerun the initial schema or migrations already applied; apply only missing migrations, in order. These management migrations require the existing management schema, `public.kbm_is_admin()`, and (for product photos/import) the private `product-images` bucket. Applying migrations is a one-time database-owner/developer setup step; a manager who imports later uses the protected website form and does not open SQL Editor for each workbook. If unsure, inspect the schema and migration history or ask the database owner before running SQL.
 
 The app uses the Supabase publishable key and authenticated user session. Row-level security and the database policies are essential parts of the security model; do not disable them to make a query work. Do not expose or add a service-role key as a workaround. Check the Supabase error and apply the correct pending migration instead.
 
@@ -105,8 +110,13 @@ The app uses the Supabase publishable key and authenticated user session. Row-le
 
 - Products, shipments, shipment lines, customers, sales, sale lines, payments, shipment costs, and stock movements are stored in Supabase.
 - Sale and shipment-receiving operations use database-side transactions to keep their related records and stock movements consistent.
+- The packing-list form uses Zod to validate its typed RPC payload before submission; the database functions independently validate preview and commit inputs.
 - Product photos are stored in a private bucket; database records refer to the stored image path.
-- Product import and translation tools operate on existing products; review proposed matches and translations before saving.
+- The packing-list import page parses `.xlsx` rows from `ITEM NO.`, `Description`, carton, quantity, RMB price/amount, CBM, and gross-weight columns. It excludes the `TOTAL` row and rejects duplicate SKU values, incomplete quantities, and inconsistent per-line RMB amounts. Review the complete line count and quantity totals before confirming.
+- The received-container import creates products only when their SKU is absent. It preserves existing product details and sale prices unless the manager explicitly enters a replacement sale price for that row. New products may be received without a sale price, which can be set later in product management. Shipment lines retain source RMB unit price, carton count, CBM, and gross weight.
+- The manager may enter a confirmed RMB/TND rate and actual additional freight/customs expenses in TND. PostgreSQL `numeric` calculations convert the source invoice and distribute the additional expenses across items in proportion to each item's source invoice value. The review shows per-item landed cost, the manually entered/current sale price, sale total, and markup over cost when the inputs make those values available. The USD coefficient in any accountant example is never applied automatically to an RMB workbook; without confirmed inputs, TND landed cost stays unavailable.
+- Once the manager confirms physical arrival, one database transaction creates the shipment, shipment lines, declared extra-cost record, explicitly changed sale prices, idempotency/audit record, and dated arrival stock movements. The receipt date is the business date for the stock movements. A retry with the same request key cannot create duplicate stock. Photos upload to the existing private bucket before that transaction and temporary uploads are cleaned up on a definite transaction rejection.
+- Product translation review remains separate: translations are not saved until an administrator reviews and submits them. Photo uploads are optimized in the browser and stored in the private bucket; the workbook itself is not sent to Telegram or an AI provider.
 - The initial schema includes `import_drafts` and `pending_actions` tables for the separate bot integration. The website assistant does not use these tables.
 
 ## Production deployment

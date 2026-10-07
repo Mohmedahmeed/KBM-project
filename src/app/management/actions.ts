@@ -68,9 +68,15 @@ export async function saveProduct(formData: FormData): Promise<ManagementActionR
   const pcsPerCarton = number(formData, "pcs_per_carton");
   const priceText = text(formData, "sale_price");
   const price = priceText ? number(formData, "sale_price") : null;
+  const nameFr = text(formData, "name_fr");
+  const nameAr = text(formData, "name_ar");
+  const size = text(formData, "size");
+  const color = text(formData, "color");
   if (!sku || !Number.isInteger(pcsPerCarton) || pcsPerCarton < 1 ||
-      (price !== null && (!Number.isFinite(price) || price < 0))) {
-    return { success: false, message: "Vérifiez le SKU, les pièces par carton et le prix." };
+      (price !== null && (!/^(?:0|[1-9]\d*)(?:\.\d{1,3})?$/.test(priceText) ||
+        !Number.isFinite(price) || price < 0 || price > 99999999999.999)) ||
+      nameFr.length > 250 || nameAr.length > 250 || size.length > 100 || color.length > 100) {
+    return { success: false, message: "Vérifiez le SKU, les pièces par carton, le prix et les variantes." };
   }
 
   const supabase = await createClient();
@@ -130,6 +136,7 @@ export async function saveProduct(formData: FormData): Promise<ManagementActionR
     p_pcs_per_carton: pcsPerCarton,
     p_sale_price: price,
     p_image_path: imagePath,
+    p_color: color || null,
   });
 
   if (error) {
@@ -151,6 +158,8 @@ export async function saveProduct(formData: FormData): Promise<ManagementActionR
 
   revalidatePath("/");
   revalidatePath("/management");
+  revalidatePath("/management/products");
+  revalidatePath("/management/stock");
   return { success: true, message: "Produit enregistré." };
 }
 
