@@ -20,7 +20,7 @@ export async function getManagementData() {
     supabase.from("shipment_items").select("shipment_id,sku,cartons,pcs_per_carton,total_pcs,unit_price_rmb").limit(5000),
     supabase.from("shipment_costs").select("id,shipment_id,cost_date,type,label,amount,currency,fx_to_tnd,basis,voided_at").is("voided_at", null).order("cost_date", { ascending: false }).limit(1000),
     supabase.from("customers").select("id,name,phone,notes,created_at").order("name").limit(1000),
-    supabase.from("sales").select("id,sale_date,customer_id,total_tnd,note,voided_at").order("sale_date", { ascending: false }).limit(1000),
+    supabase.from("sales").select("id,invoice_number,sale_date,customer_id,subtotal_tnd,discount_percent,discount_tnd,total_tnd,note,voided_at").order("sale_date", { ascending: false }).limit(1000),
     supabase.from("sale_items").select("sale_id,sku,qty,unit_price_tnd").limit(5000),
     supabase.from("payments").select("id,pay_date,customer_id,sale_id,amount_tnd,method,note,voided_at").order("pay_date", { ascending: false }).limit(1000),
   ]);

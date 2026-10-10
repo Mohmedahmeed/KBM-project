@@ -17,6 +17,7 @@ import {
   type ManagementActionResult,
 } from "./actions";
 import type { getManagementData } from "@/lib/management-data";
+import { discountTndMills, formatTndMills, parsePercentHundredths, parseTndMills, tndMillsToDecimal } from "@/lib/tnd-money";
 
 type Data = Awaited<ReturnType<typeof getManagementData>>;
 export type Section = "overview" | "products" | "stock" | "shipments" | "sales" | "customers" | "payments" | "costs";
@@ -84,13 +85,20 @@ const arabicCopy: Record<string, string> = {
   "Articles": "المنتجات", "Total cartons": "مجموع الكرتونات", "Action": "الإجراء",
   "Aucun container en transit.": "لا توجد حاوية في الطريق.", "Marquer reçu": "تأكيد الاستلام",
   "En transit": "في الطريق", "Reçu": "تم الاستلام", "N°": "الرقم", "Client": "الحريف",
-  "Total": "المجموع", "Statut": "الحالة", "Documents": "الوثائق", "Aucune vente trouvée.": "لم يتم العثور على مبيعات.",
+  "Total": "المجموع", "Total net": "الصافي", "Facture interne n°": "رقم الفاتورة الداخلية",
+  "Statut": "الحالة", "Documents": "الوثائق", "Aucune vente trouvée.": "لم يتم العثور على مبيعات.",
   "Facture interne": "فاتورة داخلية", "Bon de livraison": "وصل تسليم", "Annulée": "ملغاة",
   "Active": "نشطة", "Enregistrer une vente": "تسجيل عملية بيع", "Enregistrer la vente": "حفظ البيع",
   "Articles vendus": "المنتجات المباعة", "Choisir un produit": "اختر منتجا", "Prix unitaire (TND)": "سعر الوحدة (دينار)",
+  "Total ligne (TND)": "مجموع السطر (دينار)", "Sous-total produits (TND)": "المجموع قبل التخفيض (دينار)",
+  "Remise (%)": "التخفيض (%)", "Montant de la remise (TND)": "قيمة التخفيض (دينار)",
+  "Total net à payer (TND)": "الصافي المطلوب (دينار)", "Reste à payer (TND)": "المتبقي للدفع (دينار)",
+  "Le prix catalogue est appliqué automatiquement; vous pouvez le modifier pour cette vente.": "يُطبّق سعر البيع المسجل تلقائيا، ويمكن تغييره لهذه العملية فقط.",
+  "Numéro de facture interne attribué à l’enregistrement.": "يُسند رقم الفاتورة الداخلية عند حفظ عملية البيع.",
   "Retirer": "حذف", "+ Ajouter un article": "+ إضافة منتج", "Montant encaissé (TND)": "المبلغ المقبوض (دينار)",
   "Le stock est contrôlé et vente, paiement initial et mouvements sont enregistrés ensemble.": "يتم التثبت من المخزون وحفظ البيع والخلاص الأولي وحركات المخزون معا.",
   "Téléphone": "الهاتف", "Solde": "الرصيد",
+  "Adresse / notes du client": "عنوان الحريف / ملاحظات",
   "Document": "الوثيقة", "Relevé de compte": "كشف الحساب", "Ajouter un client": "إضافة حريف",
   "Enregistrer le client": "حفظ الحريف", "Nom du client": "اسم الحريف", "Vente liée": "البيع المرتبط",
   "Montant": "المبلغ", "Méthode": "الطريقة", "Compte client": "حساب الحريف",
@@ -158,38 +166,193 @@ function localize(node: ReactNode, enabled = true, dataArray = false): ReactNode
   return cloneElement(node, props);
 }
 
-function ActionForm({ title, action, children, submitLabel, prepare, onSuccess }: {
+function ActionForm({ title, action, children, submitLabel, prepare, onSuccess, idempotent = false, className, disableUntilValid = false, extraValid = true }: {
   title: string;
   action: Action;
   children: ReactNode;
   submitLabel: string;
   prepare?: (formData: FormData) => void;
   onSuccess?: () => void;
+  idempotent?: boolean;
+  className?: string;
+  disableUntilValid?: boolean;
+  extraValid?: boolean;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
+  const pendingRef = useRef(false);
+  const requestIdRef = useRef<string | null>(null);
   const [result, setResult] = useState<ManagementActionResult | null>(null);
   const [formKey, setFormKey] = useState(0);
+  const [pending, setPending] = useState(false);
+  const [formValid, setFormValid] = useState(!disableUntilValid);
+
+  useEffect(() => {
+    if (disableUntilValid) setFormValid(formRef.current?.checkValidity() ?? false);
+  }, [disableUntilValid, formKey]);
 
   async function submit(formData: FormData) {
-    prepare?.(formData);
-    const response = await action(formData);
-    setResult(response);
-    if (response.success) {
-      formRef.current?.reset();
-      setFormKey((key) => key + 1);
-      onSuccess?.();
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    setPending(true);
+    try {
+      if (idempotent) {
+        requestIdRef.current ??= crypto.randomUUID();
+        formData.set("request_id", requestIdRef.current);
+      }
+      prepare?.(formData);
+      const response = await action(formData);
+      setResult(response);
+      if (response.success) {
+        requestIdRef.current = null;
+        formRef.current?.reset();
+        setFormKey((key) => key + 1);
+        if (disableUntilValid) setFormValid(false);
+        onSuccess?.();
+      }
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
     }
   }
 
   return (
-    <section className="management-form-card">
+    <section className={`management-form-card${className ? ` ${className}` : ""}`}>
       <h2>{title}</h2>
-      <form key={formKey} ref={formRef} action={submit} className="management-form">
+      <form
+        key={formKey}
+        ref={formRef}
+        action={submit}
+        className="management-form"
+        aria-busy={pending}
+        onChange={disableUntilValid ? (event) => setFormValid(event.currentTarget.checkValidity()) : undefined}
+      >
         {children}
         {result && <p className={`management-feedback${result.success ? " success" : " failure"}`} role="status">{result.message}</p>}
-        <button className="management-submit" type="submit">{submitLabel}</button>
+        <button className="management-submit" type="submit" disabled={pending || (disableUntilValid && (!formValid || !extraValid))}>{submitLabel}</button>
       </form>
     </section>
+  );
+}
+
+function SaleItemsEditor({ products, locale, onAvailabilityChange }: {
+  products: Data["products"];
+  locale: "fr" | "ar";
+  onAvailabilityChange: (available: boolean) => void;
+}) {
+  const [rows, setRows] = useState([{ sku: "", qty: "", unit_price: "" }]);
+  const [discountPercent, setDiscountPercent] = useState("0");
+  const [paid, setPaid] = useState("0");
+  const serialized = JSON.stringify(rows
+    .filter((row) => row.sku && /^[1-9]\d*$/.test(row.qty) && parseTndMills(row.unit_price) !== null)
+    .map((row) => ({ sku: row.sku, qty: Number(row.qty), unit_price: row.unit_price })));
+  const rowTotals = rows.map((row) => {
+    const unitPrice = parseTndMills(row.unit_price);
+    return unitPrice !== null && /^[1-9]\d*$/.test(row.qty)
+      ? unitPrice * BigInt(row.qty)
+      : BigInt(0);
+  });
+  const subtotal = rowTotals.reduce((sum, total) => sum + total, BigInt(0));
+  const percent = parsePercentHundredths(discountPercent || "0");
+  const discount = discountTndMills(subtotal, percent ?? BigInt(0));
+  const finalTotal = subtotal - discount;
+  const paidMills = parseTndMills(paid);
+  const rowStockWarnings = rows.map((row) => {
+    const product = products.find((item) => item.sku === row.sku);
+    const quantity = /^[1-9]\d*$/.test(row.qty) ? Number(row.qty) : null;
+    return product && quantity !== null && quantity > product.stock
+      ? locale === "ar"
+        ? `المخزون غير كافٍ: المتوفر ${product.stock} قطعة فقط.`
+        : `Stock insuffisant : ${product.stock} pièce(s) disponible(s) seulement.`
+      : "";
+  });
+  const rowsAvailable = rows.length > 0 && rows.every((row) => {
+    const product = products.find((item) => item.sku === row.sku);
+    const quantityValid = /^[1-9]\d*$/.test(row.qty) &&
+      Number.isSafeInteger(Number(row.qty)) &&
+      Number(row.qty) <= 2147483647 &&
+      Boolean(product) &&
+      Number(row.qty) <= (product?.stock ?? 0);
+    const unitPrice = parseTndMills(row.unit_price);
+    return quantityValid && unitPrice !== null && unitPrice > BigInt(0);
+  });
+  const saleAvailable = rowsAvailable && percent !== null && paidMills !== null &&
+    paidMills <= finalTotal && finalTotal >= BigInt(0);
+
+  useEffect(() => {
+    onAvailabilityChange(saleAvailable);
+  }, [onAvailabilityChange, saleAvailable]);
+
+  function updateRow(index: number, key: "sku" | "qty" | "unit_price", value: string) {
+    setRows((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, [key]: value } : row));
+  }
+
+  function selectProduct(index: number, sku: string) {
+    const product = products.find((item) => item.sku === sku);
+    setRows((current) => current.map((row, rowIndex) => rowIndex === index
+      ? { ...row, sku, unit_price: product?.sale_price == null ? "" : String(product.sale_price) }
+      : row));
+  }
+
+  return (
+    <fieldset className="management-sale-items">
+      <legend>{locale === "ar" ? "المنتجات المباعة" : "Articles vendus"}</legend>
+      {rows.map((row, index) => (
+        <div className="management-sale-item" key={index}>
+          <label className="management-field">
+            <span>{locale === "ar" ? "المنتج" : "Produit"}</span>
+            <select required name={`sale_sku_${index}`} value={row.sku} onChange={(event) => selectProduct(index, event.target.value)}>
+              <option value="">{locale === "ar" ? "اختر منتجا" : "Choisir un produit"}</option>
+              {products.map((product) => <option key={product.sku} value={product.sku}>{product.sku} · {locale === "ar"
+                ? product.name_ar || product.name_fr || "اسم يحتاج إلى ترجمة"
+                : product.name_fr || product.name_ar || "Nom à traduire"} — {product.stock} pcs</option>)}
+            </select>
+          </label>
+          <label className="management-field">
+            <span>{locale === "ar" ? "الكمية (قطعة)" : "Quantité (pcs)"}</span>
+            <input
+              required
+              type="number"
+              min="1"
+              max="2147483647"
+              step="1"
+              value={row.qty}
+              aria-invalid={Boolean(rowStockWarnings[index])}
+              aria-describedby={rowStockWarnings[index] ? `sale-stock-warning-${index}` : undefined}
+              onChange={(event) => updateRow(index, "qty", event.target.value)}
+            />
+            {rowStockWarnings[index] && <span className="management-sale-stock-warning" id={`sale-stock-warning-${index}`} role="alert">⚠ {rowStockWarnings[index]}</span>}
+          </label>
+          <label className="management-field">
+            <span>{locale === "ar" ? "سعر الوحدة (دينار)" : "Prix unitaire (TND)"}</span>
+            <input required type="number" min="0.001" step="0.001" value={row.unit_price} onChange={(event) => updateRow(index, "unit_price", event.target.value)} />
+          </label>
+          <div className="management-sale-item-total">
+            <span>{locale === "ar" ? "مجموع السطر (دينار)" : "Total ligne (TND)"}</span>
+            <strong>{formatTndMills(rowTotals[index], locale)}</strong>
+          </div>
+          {rows.length > 1 && <button className="management-remove-item" type="button" onClick={() => setRows((current) => current.filter((_, rowIndex) => rowIndex !== index))} aria-label={locale === "ar" ? `حذف المنتج ${index + 1}` : `Supprimer l’article ${index + 1}`}>{locale === "ar" ? "حذف" : "Retirer"}</button>}
+        </div>
+      ))}
+      <input type="hidden" name="items" value={serialized} readOnly />
+      <button className="management-add-item" type="button" onClick={() => setRows((current) => [...current, { sku: "", qty: "", unit_price: "" }])}>{locale === "ar" ? "+ إضافة منتج" : "+ Ajouter un article"}</button>
+      <p className="management-hint">{locale === "ar"
+        ? "يُطبّق سعر البيع المسجل تلقائيا، ويمكن تغييره لهذه العملية فقط."
+        : "Le prix catalogue est appliqué automatiquement; vous pouvez le modifier pour cette vente."}</p>
+      <div className="management-sale-summary" aria-live="polite">
+        <p><span>{locale === "ar" ? "المجموع قبل التخفيض (دينار)" : "Sous-total produits (TND)"}</span><strong>{formatTndMills(subtotal, locale)}</strong></p>
+        <label className="management-field">
+          <span>{locale === "ar" ? "التخفيض (%)" : "Remise (%)"}</span>
+          <input name="discount_percent" type="number" min="0" max="100" step="0.01" value={discountPercent} onChange={(event) => setDiscountPercent(event.target.value)} />
+        </label>
+        <p><span>{locale === "ar" ? "قيمة التخفيض (دينار)" : "Montant de la remise (TND)"}</span><strong>−{formatTndMills(discount, locale)}</strong></p>
+        <p className="management-sale-summary-total"><span>{locale === "ar" ? "الصافي المطلوب (دينار)" : "Total net à payer (TND)"}</span><strong>{formatTndMills(finalTotal, locale)}</strong></p>
+        <label className="management-field">
+          <span>{locale === "ar" ? "المبلغ المقبوض (دينار)" : "Montant encaissé (TND)"}</span>
+          <input name="paid" type="number" min="0" max={tndMillsToDecimal(finalTotal)} step="0.001" value={paid} onChange={(event) => setPaid(event.target.value)} required />
+        </label>
+        <p><span>{locale === "ar" ? "المتبقي للدفع (دينار)" : "Reste à payer (TND)"}</span><strong>{formatTndMills(finalTotal - (paidMills ?? BigInt(0)), locale)}</strong></p>
+      </div>
+    </fieldset>
   );
 }
 
@@ -323,6 +486,7 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
   const section = initialSection;
   const [search, setSearch] = useState(initialSearch);
   const [productFilter, setProductFilter] = useState<ProductFilter>("all");
+  const [saleLinesAvailable, setSaleLinesAvailable] = useState(false);
   const [editingProductSku, setEditingProductSku] = useState<string | null>(null);
   const closeProductEditor = useCallback(() => setEditingProductSku(null), []);
   const [locale, setLocale] = useState<"fr" | "ar">("fr");
@@ -371,12 +535,12 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
     ...data.sales
       .filter((sale) => {
         const customer = data.customers.find((item) => item.id === sale.customer_id)?.name ?? "";
-        return `#${sale.id} ${customer} ${sale.note ?? ""}`.toLocaleLowerCase("fr").includes(query);
+        return `${sale.invoice_number} #${sale.id} ${customer} ${sale.note ?? ""}`.toLocaleLowerCase("fr").includes(query);
       })
       .slice(0, 4)
       .map((sale) => ({
         kind: isArabic ? "بيع" : "Vente",
-        label: `Vente #${sale.id}`,
+        label: `Vente ${sale.invoice_number}`,
         detail: `${data.customers.find((item) => item.id === sale.customer_id)?.name ?? "Client"} · ${money(sale.total_tnd)}`,
         href: `/management/sales?search=${encodeURIComponent(search.trim())}`,
       })),
@@ -428,7 +592,7 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
     `${shipment.code} ${shipment.notes ?? ""}`.toLocaleLowerCase("fr").includes(query));
   const visibleSales = data.sales.filter((sale) => {
     const customer = data.customers.find((item) => item.id === sale.customer_id)?.name ?? "";
-    return `${sale.id} ${customer} ${sale.note ?? ""}`.toLocaleLowerCase("fr").includes(query);
+    return `${sale.invoice_number} ${sale.id} ${customer} ${sale.note ?? ""}`.toLocaleLowerCase("fr").includes(query);
   });
   const visiblePayments = data.payments.filter((payment) => {
     const customer = data.customers.find((item) => item.id === payment.customer_id)?.name ?? "";
@@ -613,7 +777,7 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
               <Field label="Type de mouvement" name="type" options={[{ value: "casse", label: "Casse" }, { value: "ajustement", label: "Ajustement (+/-)" }]} required />
               <Field label="Quantité (pcs)" name="qty" type="number" step="1" required />
               <Field label="Date" name="mv_date" type="date" defaultValue={today} required />
-              <Field label="Note" name="note" />
+              <Field label="Note" name="note" maxLength={1000} />
             </ActionForm>
           </>
         );
@@ -658,8 +822,8 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
       case "sales":
         return (
           <>
-            <DataTable headers={["N°", "Date", "Client", "Articles", "Total", "Statut", "Documents"]} empty="Aucune vente trouvée." rows={visibleSales.map((sale) => [
-              `#${sale.id}`, sale.sale_date,
+            <DataTable headers={["Facture interne n°", "Date", "Client", "Articles", "Total net", "Statut", "Documents"]} empty="Aucune vente trouvée." rows={visibleSales.map((sale) => [
+              sale.invoice_number, sale.sale_date,
               data.customers.find((customer) => customer.id === sale.customer_id)?.name ?? "Client",
               sale.items.map((item) => `${item.sku} × ${item.qty}`).join(", ") || "—",
               money(sale.total_tnd),
@@ -669,11 +833,21 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
                 <Link href={`/management/documents?kind=delivery&sale=${sale.id}`} target="_blank">Bon de livraison</Link>
               </span>,
             ])} />
-            <ActionForm title="Enregistrer une vente" action={createSale} submitLabel="Enregistrer la vente">
+            <ActionForm
+              title="Enregistrer une vente"
+              action={createSale}
+              submitLabel="Enregistrer la vente"
+              idempotent
+              className="management-sale-form"
+              disableUntilValid
+              extraValid={saleLinesAvailable}
+              onSuccess={() => setSaleLinesAvailable(false)}
+            >
               <Field label="Client" name="customer_id" options={customerOptions} required />
               <Field label="Date" name="sale_date" type="date" defaultValue={today} required />
-              <SaleItemsEditor products={data.products} locale={locale} />
-              <Field label="Montant encaissé (TND)" name="paid" type="number" min="0" step="0.001" defaultValue="0" required />
+              <input type="hidden" name="locale" value={locale} />
+              <p className="management-hint">Numéro de facture interne attribué à l’enregistrement.</p>
+              <SaleItemsEditor products={data.products} locale={locale} onAvailabilityChange={setSaleLinesAvailable} />
               <Field label="Note" name="note" />
               <p className="management-hint">Le stock est contrôlé et vente, paiement initial et mouvements sont enregistrés ensemble.</p>
             </ActionForm>
@@ -690,7 +864,7 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
             <ActionForm title="Ajouter un client" action={saveCustomer} submitLabel="Enregistrer le client">
               <Field label="Nom du client" name="name" required />
               <Field label="Téléphone" name="phone" type="tel" />
-              <Field label="Notes" name="notes" />
+              <Field label="Adresse / notes du client" name="notes" />
             </ActionForm>
           </>
         );
@@ -735,47 +909,6 @@ export function ManagementWorkspace({ data, today, initialSection = "overview", 
       default:
         return null;
     }
-  }
-
-  function SaleItemsEditor({ products, locale }: { products: Data["products"]; locale: "fr" | "ar" }) {
-    const [rows, setRows] = useState([{ sku: "", qty: "", unit_price: "" }]);
-    const serialized = JSON.stringify(rows
-      .filter((row) => row.sku && row.qty && row.unit_price)
-      .map((row) => ({ sku: row.sku, qty: Number(row.qty), unit_price: Number(row.unit_price) })));
-
-    function updateRow(index: number, key: "sku" | "qty" | "unit_price", value: string) {
-      setRows((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, [key]: value } : row));
-    }
-
-    return (
-      <fieldset className="management-sale-items">
-        <legend>{locale === "ar" ? "المنتجات المباعة" : "Articles vendus"}</legend>
-        {rows.map((row, index) => (
-          <div className="management-sale-item" key={index}>
-            <label className="management-field">
-              <span>{locale === "ar" ? "المنتج" : "Produit"}</span>
-              <select required name={`sale_sku_${index}`} value={row.sku} onChange={(event) => updateRow(index, "sku", event.target.value)}>
-                <option value="">{locale === "ar" ? "اختر منتجا" : "Choisir un produit"}</option>
-                {products.map((product) => <option key={product.sku} value={product.sku}>{product.sku} · {locale === "ar"
-                  ? product.name_ar || product.name_fr || "اسم يحتاج إلى ترجمة"
-                  : product.name_fr || product.name_ar || "Nom à traduire"} — {product.stock} pcs</option>)}
-              </select>
-            </label>
-            <label className="management-field">
-              <span>{locale === "ar" ? "الكمية (قطعة)" : "Quantité (pcs)"}</span>
-              <input required type="number" min="1" step="1" value={row.qty} onChange={(event) => updateRow(index, "qty", event.target.value)} />
-            </label>
-            <label className="management-field">
-              <span>{locale === "ar" ? "سعر الوحدة (دينار)" : "Prix unitaire (TND)"}</span>
-              <input required type="number" min="0" step="0.001" value={row.unit_price} onChange={(event) => updateRow(index, "unit_price", event.target.value)} />
-            </label>
-            {rows.length > 1 && <button className="management-remove-item" type="button" onClick={() => setRows((current) => current.filter((_, rowIndex) => rowIndex !== index))} aria-label={locale === "ar" ? `حذف المنتج ${index + 1}` : `Supprimer l’article ${index + 1}`}>{locale === "ar" ? "حذف" : "Retirer"}</button>}
-          </div>
-        ))}
-        <input type="hidden" name="items" value={serialized} readOnly />
-        <button className="management-add-item" type="button" onClick={() => setRows((current) => [...current, { sku: "", qty: "", unit_price: "" }])}>{locale === "ar" ? "+ إضافة منتج" : "+ Ajouter un article"}</button>
-      </fieldset>
-    );
   }
 
   function ReceiveAction({ shipmentId, locale }: { shipmentId: number; locale: "fr" | "ar" }) {

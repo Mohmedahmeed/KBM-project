@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { parsePercentHundredths, parseTndMills } from "@/lib/tnd-money";
 
 export type ManagementActionResult = { success: true; message: string } | { success: false; message: string };
 
@@ -21,12 +22,13 @@ function validDate(value: string) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-function isSaleItem(value: unknown): value is { sku: string; qty: number; unit_price: number } {
+function isSaleItem(value: unknown): value is { sku: string; qty: number | string; unit_price: number | string } {
   if (typeof value !== "object" || value === null) return false;
   if (!("sku" in value) || !("qty" in value) || !("unit_price" in value)) return false;
   return typeof value.sku === "string" && value.sku.trim().length > 0 &&
-    Number.isInteger(Number(value.qty)) && Number(value.qty) > 0 &&
-    Number.isFinite(Number(value.unit_price)) && Number(value.unit_price) >= 0;
+    Number.isInteger(Number(value.qty)) && Number(value.qty) > 0 && Number(value.qty) <= 2147483647 &&
+    (typeof value.unit_price === "string" || typeof value.unit_price === "number") &&
+    parseTndMills(value.unit_price) !== null;
 }
 
 function isProductTranslation(value: unknown): value is {
@@ -43,7 +45,14 @@ function isProductTranslation(value: unknown): value is {
     typeof value.name_ar === "string" && value.name_ar.trim().length > 0 && value.name_ar.trim().length <= 250;
 }
 
-async function runAdminRpc(name: string, args: Record<string, unknown>): Promise<ManagementActionResult> {
+async function runAdminRpc(
+  name: string,
+  args: Record<string, unknown>,
+  messages?: {
+    success?: (data: unknown) => string;
+    failure?: (message: string) => string;
+  },
+): Promise<ManagementActionResult> {
   const supabase = await createClient();
   const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
   const email = typeof claimsData?.claims?.email === "string" ? claimsData.claims.email.toLowerCase() : "";
@@ -52,15 +61,17 @@ async function runAdminRpc(name: string, args: Record<string, unknown>): Promise
     return { success: false, message: "Accès réservé au compte administrateur." };
   }
 
-  const { error } = await supabase.rpc(name, args);
+  const { data, error } = await supabase.rpc(name, args);
   if (error) {
-    return { success: false, message: error.message };
+    return { success: false, message: messages?.failure?.(error.message) ?? error.message };
   }
 
   revalidatePath("/");
   revalidatePath("/management");
+  revalidatePath("/management/sales");
+  revalidatePath("/management/documents");
   revalidatePath("/management/translations");
-  return { success: true, message: "Opération enregistrée." };
+  return { success: true, message: messages?.success?.(data) ?? "Opération enregistrée." };
 }
 
 export async function saveProduct(formData: FormData): Promise<ManagementActionResult> {
@@ -263,30 +274,64 @@ export async function setShipmentFx(formData: FormData): Promise<ManagementActio
 export async function createSale(formData: FormData): Promise<ManagementActionResult> {
   const saleDate = text(formData, "sale_date");
   const customerId = number(formData, "customer_id");
-  const paid = number(formData, "paid");
+  const paid = text(formData, "paid");
+  const discountPercent = text(formData, "discount_percent") || "0";
+  const requestId = text(formData, "request_id");
+  const locale = text(formData, "locale") === "ar" ? "ar" : "fr";
+  const invalid = locale === "ar"
+    ? "تحقق من الحريف والتاريخ والمنتجات والتخفيض والمبلغ المقبوض."
+    : "Vérifiez le client, la date, les articles, la remise et le montant encaissé.";
   let items: unknown;
   try {
     items = JSON.parse(text(formData, "items"));
   } catch {
-    return { success: false, message: "Les articles de la vente sont invalides." };
+    return { success: false, message: locale === "ar" ? "المنتجات المباعة غير صالحة." : "Les articles de la vente sont invalides." };
   }
 
+  const note = text(formData, "note");
   if (!validDate(saleDate) || !Number.isInteger(customerId) || customerId < 1 ||
-      !Number.isFinite(paid) || paid < 0 || !Array.isArray(items) || items.length === 0 ||
-      !items.every(isSaleItem)) {
-    return { success: false, message: "Vérifiez le client, la date, les articles et le paiement." };
+      parseTndMills(paid) === null || parsePercentHundredths(discountPercent) === null ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ||
+      !Array.isArray(items) || items.length === 0 || items.length > 1000 ||
+      !items.every(isSaleItem) || note.length > 1000) {
+    return { success: false, message: invalid };
   }
 
   return runAdminRpc("web_create_sale", {
+    p_request_id: requestId,
     p_sale_date: saleDate,
     p_customer_id: customerId,
     p_items: items.map((item) => ({
       sku: item.sku.trim(),
       qty: Number(item.qty),
-      unit_price: Number(item.unit_price),
+      unit_price: String(item.unit_price),
     })),
+    p_discount_percent: discountPercent,
     p_paid: paid,
-    p_note: text(formData, "note"),
+    p_note: note,
+  }, {
+    success: (data) => {
+      const invoiceNumber = typeof data === "object" && data !== null && "invoice_number" in data &&
+        typeof data.invoice_number === "string" ? data.invoice_number : "";
+      if (locale === "ar") return invoiceNumber
+        ? `تم تسجيل البيع. رقم الفاتورة الداخلية: ${invoiceNumber}.`
+        : "تم تسجيل البيع.";
+      return invoiceNumber
+        ? `Vente enregistrée — facture interne ${invoiceNumber}.`
+        : "Vente enregistrée.";
+    },
+    failure: (message) => {
+      if (message === "sale_insufficient_stock") return locale === "ar"
+        ? "المخزون غير كافٍ لأحد المنتجات."
+        : "Stock insuffisant pour un ou plusieurs produits.";
+      if (message === "sale_request_conflict") return locale === "ar"
+        ? "تعذر تأكيد العملية بنفس الطلب. أعد تحميل الصفحة وتحقق من سجل المبيعات."
+        : "La demande ne correspond pas à la vente déjà enregistrée. Rechargez et vérifiez l’historique.";
+      if (message.startsWith("sale_")) return locale === "ar"
+        ? "تعذر تسجيل البيع. تحقق من البيانات والصلاحيات."
+        : "La vente n’a pas pu être enregistrée. Vérifiez les données et les autorisations.";
+      return message;
+    },
   });
 }
 
